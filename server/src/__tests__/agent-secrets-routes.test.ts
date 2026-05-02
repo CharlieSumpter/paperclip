@@ -186,7 +186,7 @@ describe("GET /api/agents/me/secrets/:name", () => {
     );
   });
 
-  it("logs runId as null when the actor has no runId", async () => {
+  it("logs runId as null and details.warning='missing_run_id' when the actor has no runId", async () => {
     mockSecretService.readForAgent.mockResolvedValueOnce({
       secret: { id: "s-2", name: "ALPACA_KEY", agentId: "agent-1" },
       value: "ak",
@@ -205,7 +205,72 @@ describe("GET /api/agents/me/secrets/:name", () => {
     expect(res.status).toBe(200);
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ runId: null, action: "secret.read" }),
+      expect.objectContaining({
+        runId: null,
+        action: "secret.read",
+        details: expect.objectContaining({ warning: "missing_run_id" }),
+      }),
     );
+  });
+
+  it("returns agent-scoped secret (scope: agent) when agent-scoped match exists", async () => {
+    mockSecretService.readForAgent.mockResolvedValueOnce({
+      secret: { id: "s-3", name: "MY_KEY", agentId: "agent-1" },
+      value: "agent-value",
+      version: 1,
+      scope: "agent",
+    });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      runId: "run-1",
+      source: "agent_jwt",
+    });
+    const res = await request(app).get("/api/agents/me/secrets/MY_KEY");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ name: "MY_KEY", scope: "agent", value: "agent-value" });
+  });
+
+  it("returns 404 (not 403) when agent-B tries to read agent-A's secret — no value or scope leaked", async () => {
+    // readForAgent returns null when secret is not in agent's visible scope
+    mockSecretService.readForAgent.mockResolvedValueOnce(null);
+
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-B",
+      companyId: "company-1",
+      runId: "run-99",
+      source: "agent_jwt",
+    });
+    const res = await request(app).get("/api/agents/me/secrets/AGENT_A_SECRET");
+
+    expect(res.status).toBe(404);
+    expect(res.body.value).toBeUndefined();
+    expect(res.body.scope).toBeUndefined();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for cross-company reads (service returns null for wrong company)", async () => {
+    mockSecretService.readForAgent.mockResolvedValueOnce(null);
+
+    const app = await createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-other",
+      runId: "run-1",
+      source: "agent_jwt",
+    });
+    const res = await request(app).get("/api/agents/me/secrets/GITLAB_TOKEN");
+
+    expect(res.status).toBe(404);
+    expect(mockSecretService.readForAgent).toHaveBeenCalledWith(
+      "company-other",
+      "agent-1",
+      "GITLAB_TOKEN",
+    );
+    expect(mockLogActivity).not.toHaveBeenCalled();
   });
 });

@@ -114,6 +114,7 @@ export function secretRoutes(db: Db) {
       return;
     }
 
+    const runId = req.actor.runId ?? null;
     await logActivity(db, {
       companyId: req.actor.companyId,
       actorType: "agent",
@@ -122,8 +123,13 @@ export function secretRoutes(db: Db) {
       entityType: "secret",
       entityId: result.secret.id,
       agentId: req.actor.agentId,
-      runId: req.actor.runId ?? null,
-      details: { name: result.secret.name, scope: result.scope, version: result.version },
+      runId,
+      details: {
+        name: result.secret.name,
+        scope: result.scope,
+        version: result.version,
+        ...(runId === null ? { warning: "missing_run_id" } : {}),
+      },
     });
 
     res.json({
