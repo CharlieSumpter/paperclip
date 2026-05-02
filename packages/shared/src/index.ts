@@ -746,6 +746,8 @@ export {
   createSecretSchema,
   rotateSecretSchema,
   updateSecretSchema,
+  agentSecretNameParamSchema,
+  SECRET_NAME_RE,
   createRoutineSchema,
   updateRoutineSchema,
   createRoutineTriggerSchema,

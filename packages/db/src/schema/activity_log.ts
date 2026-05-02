@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { pgTable, uuid, text, timestamp, jsonb, index } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
@@ -22,5 +23,8 @@ export const activityLog = pgTable(
     companyCreatedIdx: index("activity_log_company_created_idx").on(table.companyId, table.createdAt),
     runIdIdx: index("activity_log_run_id_idx").on(table.runId),
     entityIdx: index("activity_log_entity_type_id_idx").on(table.entityType, table.entityId),
+    secretReadsIdx: index("activity_log_secret_reads_idx")
+      .on(table.entityId, table.createdAt.desc())
+      .where(sql`${table.entityType} = 'secret' AND ${table.action} = 'secret.read'`),
   }),
 );
