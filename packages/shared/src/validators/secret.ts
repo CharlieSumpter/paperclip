@@ -21,12 +21,15 @@ export const envBindingSchema = z.union([
 
 export const envConfigSchema = z.record(envBindingSchema);
 
+export const SECRET_NAME_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
+
 export const createSecretSchema = z.object({
-  name: z.string().min(1),
+  name: z.string().min(1).max(128).regex(SECRET_NAME_RE),
   provider: z.enum(SECRET_PROVIDERS).optional(),
   value: z.string().min(1),
   description: z.string().optional().nullable(),
   externalRef: z.string().optional().nullable(),
+  agentId: z.string().uuid().nullable().optional(),
 });
 
 export type CreateSecret = z.infer<typeof createSecretSchema>;
@@ -39,9 +42,15 @@ export const rotateSecretSchema = z.object({
 export type RotateSecret = z.infer<typeof rotateSecretSchema>;
 
 export const updateSecretSchema = z.object({
-  name: z.string().min(1).optional(),
+  name: z.string().min(1).max(128).regex(SECRET_NAME_RE).optional(),
   description: z.string().optional().nullable(),
   externalRef: z.string().optional().nullable(),
 });
 
 export type UpdateSecret = z.infer<typeof updateSecretSchema>;
+
+export const agentSecretNameParamSchema = z.object({
+  name: z.string().min(1).max(128).regex(SECRET_NAME_RE),
+});
+
+export type AgentSecretNameParam = z.infer<typeof agentSecretNameParamSchema>;

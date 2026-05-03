@@ -267,9 +267,12 @@ export {
   createSecretSchema,
   rotateSecretSchema,
   updateSecretSchema,
+  agentSecretNameParamSchema,
+  SECRET_NAME_RE,
   type CreateSecret,
   type RotateSecret,
   type UpdateSecret,
+  type AgentSecretNameParam,
 } from "./secret.js";
 
 export {

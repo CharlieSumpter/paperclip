@@ -3,6 +3,7 @@ import type { Db } from "@paperclipai/db";
 import {
   SECRET_PROVIDERS,
   type SecretProvider,
+  agentSecretNameParamSchema,
   createSecretSchema,
   rotateSecretSchema,
   updateSecretSchema,
@@ -32,7 +33,12 @@ export function secretRoutes(db: Db) {
     assertBoard(req);
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const secrets = await svc.list(companyId);
+    const agentIdFilter = typeof req.query.agentId === "string" ? req.query.agentId : undefined;
+    const scopeFilter = typeof req.query.scope === "string" ? req.query.scope : undefined;
+    const opts: { agentId?: string | null } = {};
+    if (agentIdFilter) opts.agentId = agentIdFilter;
+    else if (scopeFilter === "company") opts.agentId = null;
+    const secrets = await svc.list(companyId, opts);
     res.json(secrets);
   });
 
@@ -49,6 +55,7 @@ export function secretRoutes(db: Db) {
         value: req.body.value,
         description: req.body.description,
         externalRef: req.body.externalRef,
+        agentId: req.body.agentId ?? null,
       },
       { userId: req.actor.userId ?? "board", agentId: null },
     );
@@ -60,10 +67,77 @@ export function secretRoutes(db: Db) {
       action: "secret.created",
       entityType: "secret",
       entityId: created.id,
-      details: { name: created.name, provider: created.provider },
+      details: { name: created.name, provider: created.provider, agentId: created.agentId },
     });
 
     res.status(201).json(created);
+  });
+
+  /**
+   * Agent-side read endpoints. Authenticated by the run JWT via actorMiddleware.
+   * Scope: companyId(self) AND (agent_id IS NULL OR agent_id = self).
+   */
+  router.get("/agents/me/secrets", async (req, res) => {
+    if (req.actor.type !== "agent" || !req.actor.agentId || !req.actor.companyId) {
+      res.status(401).json({ error: "Agent authentication required" });
+      return;
+    }
+    const rows = await svc.listForAgent(req.actor.companyId, req.actor.agentId);
+    res.json(
+      rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        description: row.description,
+        provider: row.provider,
+        latestVersion: row.latestVersion,
+        scope: row.agentId === null ? "company" : "agent",
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        lastReadAt: row.lastReadAt,
+      })),
+    );
+  });
+
+  router.get("/agents/me/secrets/:name", async (req, res) => {
+    if (req.actor.type !== "agent" || !req.actor.agentId || !req.actor.companyId) {
+      res.status(401).json({ error: "Agent authentication required" });
+      return;
+    }
+    const parsed = agentSecretNameParamSchema.safeParse({ name: req.params.name });
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid secret name" });
+      return;
+    }
+    const result = await svc.readForAgent(req.actor.companyId, req.actor.agentId, parsed.data.name);
+    if (!result) {
+      res.status(404).json({ error: "Secret not found" });
+      return;
+    }
+
+    const runId = req.actor.runId ?? null;
+    await logActivity(db, {
+      companyId: req.actor.companyId,
+      actorType: "agent",
+      actorId: req.actor.agentId,
+      action: "secret.read",
+      entityType: "secret",
+      entityId: result.secret.id,
+      agentId: req.actor.agentId,
+      runId,
+      details: {
+        name: result.secret.name,
+        scope: result.scope,
+        version: result.version,
+        ...(runId === null ? { warning: "missing_run_id" } : {}),
+      },
+    });
+
+    res.json({
+      name: result.secret.name,
+      value: result.value,
+      version: result.version,
+      scope: result.scope,
+    });
   });
 
   router.post("/secrets/:id/rotate", validate(rotateSecretSchema), async (req, res) => {

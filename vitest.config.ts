@@ -16,6 +16,7 @@ export default defineConfig({
       "server",
       "ui",
       "cli",
+      "skills/paperclip-http-client",
     ],
   },
 });

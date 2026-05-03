@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { companySecrets, companySecretVersions } from "@paperclipai/db";
 import type { AgentEnvConfig, EnvBinding, SecretProvider } from "@paperclipai/shared";
@@ -52,12 +52,40 @@ export function secretService(db: Db) {
       .then((rows) => rows[0] ?? null);
   }
 
-  async function getByName(companyId: string, name: string) {
+  async function getByName(
+    companyId: string,
+    name: string,
+    agentId: string | null = null,
+  ) {
+    const agentScope =
+      agentId === null
+        ? isNull(companySecrets.agentId)
+        : eq(companySecrets.agentId, agentId);
     return db
       .select()
       .from(companySecrets)
-      .where(and(eq(companySecrets.companyId, companyId), eq(companySecrets.name, name)))
+      .where(and(eq(companySecrets.companyId, companyId), agentScope, eq(companySecrets.name, name)))
       .then((rows) => rows[0] ?? null);
+  }
+
+  /**
+   * Resolve a secret for an agent caller. Agent-scoped match wins over
+   * company-wide match of the same name.
+   */
+  async function getForAgent(companyId: string, agentId: string, name: string) {
+    const rows = await db
+      .select()
+      .from(companySecrets)
+      .where(
+        and(
+          eq(companySecrets.companyId, companyId),
+          eq(companySecrets.name, name),
+          or(isNull(companySecrets.agentId), eq(companySecrets.agentId, agentId)),
+        ),
+      );
+    if (rows.length === 0) return null;
+    // Prefer agent-scoped over company-wide.
+    return rows.find((row) => row.agentId === agentId) ?? rows[0];
   }
 
   async function getSecretVersion(secretId: string, version: number) {
@@ -155,16 +183,65 @@ export function secretService(db: Db) {
   return {
     listProviders: () => listSecretProviders(),
 
-    list: (companyId: string) =>
+    list: (companyId: string, opts?: { agentId?: string | null | undefined }) => {
+      const filters = [eq(companySecrets.companyId, companyId)];
+      if (opts && Object.prototype.hasOwnProperty.call(opts, "agentId")) {
+        filters.push(
+          opts.agentId === null
+            ? isNull(companySecrets.agentId)
+            : eq(companySecrets.agentId, opts.agentId as string),
+        );
+      }
+      return db
+        .select()
+        .from(companySecrets)
+        .where(and(...filters))
+        .orderBy(desc(companySecrets.createdAt));
+    },
+
+    /**
+     * List secrets visible to an agent: own agent-scoped + company-wide.
+     */
+    listForAgent: (companyId: string, agentId: string) =>
       db
         .select()
         .from(companySecrets)
-        .where(eq(companySecrets.companyId, companyId))
+        .where(
+          and(
+            eq(companySecrets.companyId, companyId),
+            or(isNull(companySecrets.agentId), eq(companySecrets.agentId, agentId)),
+          ),
+        )
         .orderBy(desc(companySecrets.createdAt)),
 
     getById,
     getByName,
+    getForAgent,
     resolveSecretValue,
+
+    /**
+     * Resolve and decrypt the latest version of a secret for an agent caller.
+     * Updates `last_read_at` denormalization. Audit logging is the route's job.
+     */
+    readForAgent: async (
+      companyId: string,
+      agentId: string,
+      name: string,
+    ): Promise<{ secret: typeof companySecrets.$inferSelect; value: string; version: number; scope: "agent" | "company" } | null> => {
+      const secret = await getForAgent(companyId, agentId, name);
+      if (!secret) return null;
+      const value = await resolveSecretValue(companyId, secret.id, "latest");
+      await db
+        .update(companySecrets)
+        .set({ lastReadAt: sql`now()` })
+        .where(eq(companySecrets.id, secret.id));
+      return {
+        secret,
+        value,
+        version: secret.latestVersion,
+        scope: secret.agentId === null ? "company" : "agent",
+      };
+    },
 
     create: async (
       companyId: string,
@@ -174,10 +251,11 @@ export function secretService(db: Db) {
         value: string;
         description?: string | null;
         externalRef?: string | null;
+        agentId?: string | null;
       },
       actor?: { userId?: string | null; agentId?: string | null },
     ) => {
-      const existing = await getByName(companyId, input.name);
+      const existing = await getByName(companyId, input.name, input.agentId ?? null);
       if (existing) throw conflict(`Secret already exists: ${input.name}`);
 
       const provider = getSecretProvider(input.provider);
@@ -191,6 +269,7 @@ export function secretService(db: Db) {
           .insert(companySecrets)
           .values({
             companyId,
+            agentId: input.agentId ?? null,
             name: input.name,
             provider: input.provider,
             externalRef: prepared.externalRef,
@@ -263,7 +342,7 @@ export function secretService(db: Db) {
       if (!secret) throw notFound("Secret not found");
 
       if (patch.name && patch.name !== secret.name) {
-        const duplicate = await getByName(secret.companyId, patch.name);
+        const duplicate = await getByName(secret.companyId, patch.name, secret.agentId);
         if (duplicate && duplicate.id !== secret.id) {
           throw conflict(`Secret already exists: ${patch.name}`);
         }
