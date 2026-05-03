@@ -1,0 +1,13 @@
+{
+  "name": "@paperclipai/skill-paperclip-http-client",
+  "private": true,
+  "type": "module",
+  "version": "0.0.1",
+  "description": "Reusable HTTP-auth helpers and pre-baked recipes for calling third-party APIs from Paperclip agents.",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "*"
+  }
+}
