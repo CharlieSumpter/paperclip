@@ -21,6 +21,7 @@ import {
   issueComments,
   issueDocuments,
   issueRelations,
+  issueThreadInteractions,
   issueTreeHoldMembers,
   issueTreeHolds,
   issues,
@@ -318,6 +319,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     await db.delete(documentRevisions);
     await db.delete(documents);
     await db.delete(issueRelations);
+    await db.delete(issueThreadInteractions);
     await db.delete(issueTreeHoldMembers);
     await db.delete(issueTreeHolds);
     for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -2357,5 +2359,141 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
     expect(runs).toHaveLength(1);
+  });
+
+  describe("pending input-gate interactions (AI-455)", () => {
+    it("treats an in_progress issue with a pending wake_assignee suggest_tasks interaction as active, not stranded", async () => {
+      const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+        status: "in_progress",
+        runStatus: "succeeded",
+        livenessState: "advanced",
+      });
+      await db.insert(issueThreadInteractions).values({
+        companyId,
+        issueId,
+        kind: "suggest_tasks",
+        status: "pending",
+        continuationPolicy: "wake_assignee",
+        payload: { tasks: [] },
+      });
+      const heartbeat = heartbeatService(db);
+
+      const result = await heartbeat.reconcileStrandedAssignedIssues();
+      expect(result.continuationRequeued).toBe(0);
+      expect(result.escalated).toBe(0);
+      expect(result.dispatchRequeued).toBe(0);
+      expect(result.skipped).toBe(1);
+      expect(result.issueIds).toEqual([]);
+
+      const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+      expect(issue?.status).toBe("in_progress");
+
+      const recoveryIssues = await db
+        .select()
+        .from(issues)
+        .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "stranded_issue_recovery")));
+      expect(recoveryIssues).toHaveLength(0);
+
+      const wakeups = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId));
+      expect(wakeups).toHaveLength(1);
+    });
+
+    it("treats an in_progress issue with a pending wake_assignee ask_user_questions interaction as active", async () => {
+      const { companyId, issueId } = await seedStrandedIssueFixture({
+        status: "in_progress",
+        runStatus: "succeeded",
+        livenessState: "advanced",
+      });
+      await db.insert(issueThreadInteractions).values({
+        companyId,
+        issueId,
+        kind: "ask_user_questions",
+        status: "pending",
+        continuationPolicy: "wake_assignee",
+        payload: { questions: [] },
+      });
+      const heartbeat = heartbeatService(db);
+
+      const result = await heartbeat.reconcileStrandedAssignedIssues();
+      expect(result.continuationRequeued).toBe(0);
+      expect(result.escalated).toBe(0);
+      expect(result.skipped).toBe(1);
+
+      const recoveryIssues = await db
+        .select()
+        .from(issues)
+        .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "stranded_issue_recovery")));
+      expect(recoveryIssues).toHaveLength(0);
+    });
+
+    it("treats an in_progress issue with a pending wake_assignee_on_accept request_confirmation interaction as active", async () => {
+      const { companyId, issueId } = await seedStrandedIssueFixture({
+        status: "in_progress",
+        runStatus: "succeeded",
+        livenessState: "advanced",
+      });
+      await db.insert(issueThreadInteractions).values({
+        companyId,
+        issueId,
+        kind: "request_confirmation",
+        status: "pending",
+        continuationPolicy: "wake_assignee_on_accept",
+        payload: { summary: "Approve plan" },
+      });
+      const heartbeat = heartbeatService(db);
+
+      const result = await heartbeat.reconcileStrandedAssignedIssues();
+      expect(result.continuationRequeued).toBe(0);
+      expect(result.escalated).toBe(0);
+      expect(result.skipped).toBe(1);
+
+      const recoveryIssues = await db
+        .select()
+        .from(issues)
+        .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "stranded_issue_recovery")));
+      expect(recoveryIssues).toHaveLength(0);
+    });
+
+    it("does not skip recovery when the interaction has already been resolved", async () => {
+      const { companyId, issueId } = await seedStrandedIssueFixture({
+        status: "in_progress",
+        runStatus: "succeeded",
+        livenessState: "advanced",
+      });
+      await db.insert(issueThreadInteractions).values({
+        companyId,
+        issueId,
+        kind: "suggest_tasks",
+        status: "accepted",
+        continuationPolicy: "wake_assignee",
+        payload: { tasks: [] },
+      });
+      const heartbeat = heartbeatService(db);
+
+      const result = await heartbeat.reconcileStrandedAssignedIssues();
+      expect(result.continuationRequeued).toBe(1);
+      expect(result.issueIds).toEqual([issueId]);
+    });
+
+    it("does not skip recovery when the only pending interaction has continuationPolicy 'none'", async () => {
+      const { companyId, issueId } = await seedStrandedIssueFixture({
+        status: "in_progress",
+        runStatus: "succeeded",
+        livenessState: "advanced",
+      });
+      await db.insert(issueThreadInteractions).values({
+        companyId,
+        issueId,
+        kind: "request_confirmation",
+        status: "pending",
+        continuationPolicy: "none",
+        payload: { summary: "FYI only" },
+      });
+      const heartbeat = heartbeatService(db);
+
+      const result = await heartbeat.reconcileStrandedAssignedIssues();
+      expect(result.continuationRequeued).toBe(1);
+      expect(result.issueIds).toEqual([issueId]);
+    });
   });
 });
